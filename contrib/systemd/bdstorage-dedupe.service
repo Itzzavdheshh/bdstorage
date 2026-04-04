@@ -1,0 +1,20 @@
+# Bare-metal systemd (e.g. Ubuntu): see contrib/systemd/README.md for full commands.
+#
+# Prerequisites: binary at /usr/local/bin/bdstorage, /etc/bdstorage.env, user bdstorage
+# with HOME=/var/lib/bdstorage and permission to read/write BDSTORAGE_TARGET.
+
+[Unit]
+Description=bdstorage deduplication daemon (periodic dedupe)
+After=local-fs.target
+
+[Service]
+Type=simple
+User=bdstorage
+Group=bdstorage
+EnvironmentFile=-/etc/bdstorage.env
+ExecStart=/usr/local/bin/bdstorage daemon $BDSTORAGE_TARGET --interval-secs $BDSTORAGE_INTERVAL_SECS
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

@@ -218,7 +218,7 @@ sudo bdstorage daemon install --target /path/to/watch --interval-secs 60
 > **IMPORTANT:** If your target is on a standard filesystem like ext4 (no CoW reflinks), you must add `--allow-unsafe-hardlinks` to the install command. If you do not, the daemon intentionally skips deduplication on unsupported filesystems to protect your files.
 
 ```bash
-sudo bdstorage daemon install --target /path/to/watch --interval-secs 60 --allow-unsafe-hardlinks
+sudo bdstorage daemon install --target /path/to/watch --interval-secs 60 
 ```
 
 **Step 3: Enable and Start**

@@ -12,9 +12,20 @@
 3. [System Requirements](#-system-requirements)
 4. [Installation](#-installation)
 5. [Usage Guide](#-usage-guide)
-6. [Data Locations & Storage](#-data-locations--storage)
-7. [Safety Guarantees](#-safety-guarantees)
-8. [License](#-license)
+   - [Quick start](#quick-start)
+   - [Typical workflow](#typical-workflow)
+   - [What one `dedupe` run does](#what-one-dedupe-run-does)
+   - [Commands and flags](#commands-and-flags)
+6. [Background Daemon (Linux Only)](#background-daemon-linux-only)
+   - [Overview](#overview)
+   - [Installation & Setup](#installation--setup)
+   - [Configuring the Scan Interval](#configuring-the-scan-interval)
+   - [Managing the Daemon](#managing-the-daemon)
+   - [How to Verify it is Working](#how-to-verify-it-is-working)
+   - [Known Limitations](#known-limitations)
+7. [Data Locations & Storage](#-data-locations--storage)
+8. [Safety Guarantees](#-safety-guarantees)
+9. [License](#-license)
 
 ---
 
@@ -68,7 +79,7 @@ Transparency is critical. You can reproduce these exact numbers on your own mach
    ```bash
    hyperfine \
      --warmup 1 \
-     --prepare 'rm -rf ~/.bdstorage && rm -rf /tmp/bench_data/arena_tiny/test && cp -r /tmp/bench_data/arena_tiny/pristine /tmp/bench_data/arena_tiny/test' \
+     --prepare 'rm -rf ~/.imprint && rm -rf /tmp/bench_data/arena_tiny/test && cp -r /tmp/bench_data/arena_tiny/pristine /tmp/bench_data/arena_tiny/test' \
      '../target/release/bdstorage dedupe /tmp/bench_data/arena_tiny/test' \
      'rmlint /tmp/bench_data/arena_tiny/test' \
      'jdupes -r /tmp/bench_data/arena_tiny/test'
@@ -107,7 +118,7 @@ cargo install bdstorage
 
 ### Option 2: Build from Source
 ```bash
-git clone [https://github.com/Rakshat28/bdstorage](https://github.com/Rakshat28/bdstorage)
+git clone https://github.com/Rakshat28/bdstorage.git
 cd bdstorage
 cargo build --release
 ```
@@ -116,46 +127,174 @@ cargo build --release
 
 ## Usage Guide
 
-### 1. Scan (Read-Only Analysis)
-Analyze a directory to find duplicate candidates. This operation is 100% read-only and will not move files or modify your database.
+### Quick start
+
+1. **Install** (see [Installation](#-installation)). From a source build, the binary is `target/release/bdstorage` (add it to your `PATH` or call it by full path).
+2. **Pick a directory tree** on a filesystem that supports **reflinks** if you want the default behavior (see [System Requirements](#-system-requirements)). On ext4 without reflinks, files are skipped unless you use `--allow-unsafe-hardlinks` (understand the metadata implications first).
+3. **Preview**, then **apply**:
+   ```bash
+   bdstorage dedupe /path/to/tree -n    # dry-run: no writes
+   bdstorage dedupe /path/to/tree       # real run
+   ```
+4. **State and vault** are created under **`$HOME/.imprint/`** on first use ([Data Locations & Storage](#-data-locations--storage)).
+
+Use **`bdstorage --help`** and **`bdstorage <subcommand> --help`** for the full CLI.
+
+### Typical workflow
+
+| Step | Command | What you get |
+|:---|:---|:---|
+| 1 (optional) | `bdstorage scan /path/to/tree` | Same walk + hash + DB indexing as dedupe, and prints duplicate **group** count; does **not** vault files or create links. |
+| 2 (recommended) | `bdstorage dedupe /path/to/tree -n` | Same logic as a real dedupe, but only prints what **would** happen. |
+| 3 | `bdstorage dedupe /path/to/tree` | Vaults one copy per duplicate group and replaces the rest with reflinks (or hard links if allowed). |
+| 4 (optional) | `bdstorage daemon run /path/to/tree --interval-secs 3600` | Repeats step 3 on an interval; see [Background Daemon](#background-daemon-linux-only). |
+| If you need originals back | `bdstorage restore /path/to/tree` | Copies data back from the vault and breaks links; see restore flags below. |
+
+Run **`restore`** when you want independent file copies again (for example before migrating data off the machine or when you no longer want shared extents).
+
+### What one `dedupe` run does
+
+End to end, a single **`bdstorage dedupe <path>`** does the following:
+
+1. **Walk** the tree and collect regular files (scratch names like `*.imprint_tmp` are ignored).
+2. **Group by size** — files whose size appears only once cannot have a same-size duplicate, so they are dropped from further work without extra reads.
+3. **Sparse sample hash** — for larger files, read small samples (start / middle / end) so different content is often rejected without a full read.
+4. **Full BLAKE3** — remaining candidates get a full-file hash; matching hashes mean identical content for practical purposes.
+5. **Vault** — for each group with two or more paths, one file becomes the **master** in **`~/.imprint/store/`**, addressed by hash (see [Architecture](#-how-it-works-architecture) for reflink vs hard link).
+6. **Replace duplicates** — other paths in the group are replaced by links to the vaulted master; the embedded **redb** database records paths, hashes, refcounts, and vaulted inode markers so later runs and **`restore`** stay consistent.
+
+Interrupted runs are designed so you do not end up with half-linked files without the vault copy in place; see [Safety Guarantees](#-safety-guarantees).
+
+### Commands and flags
+
+**Scan** (read-only analysis):
+
 ```bash
 bdstorage scan /path/to/directory
 ```
 
-### 2. Dedupe (Write-Mode)
-Execute the deduplication process. Master files are vaulted, and duplicates are replaced with reflinks.
+**Dedupe** (writes vault + links):
+
 ```bash
 bdstorage dedupe /path/to/directory
 ```
 
-**Flags:**
-* `--paranoid`: Perform a strict byte-for-byte comparison against the vaulted file before linking to guarantee 100% collision safety and protect against bit rot.
-* `-n, --dry-run`: Simulate the deduplication process, printing what *would* happen without actually modifying the filesystem or database.
-* `--allow-unsafe-hardlinks`: Enable hard link fallback when the filesystem does not support CoW reflinks. Hard links share the same inode, meaning all linked files will have identical metadata (timestamps, permissions). Best suited for read-only data or scenarios where metadata independence is not required.
+| Flag | Meaning |
+|:---|:---|
+| `--paranoid` | Before linking, compare bytes against the vaulted master (extra safety / bit-rot detection). |
+| `-n`, `--dry-run` | Print actions only; no filesystem or DB changes for real dedupe. |
+| `--allow-unsafe-hardlinks` | If reflinks are unsupported, use hard links instead of skipping (shared inode and metadata). |
 
-### 3. Restore (Un-Dedupe)
-Reverse the deduplication process. This breaks the shared links and restores independent, physical copies of the data back to their original locations.
+**Restore** (copy back from vault, unlink deduped files):
+
 ```bash
 bdstorage restore /path/to/directory
 ```
-*Note: If a vaulted file's reference count drops to zero during a restore, `bdstorage` automatically prunes it to free up space (Garbage Collection).*
 
-**Flags:**
-* `-n, --dry-run`: Simulate the restoration process without modifying the filesystem.
+| Flag | Meaning |
+|:---|:---|
+| `-n`, `--dry-run` | Show what would be restored without writing. |
+
+When a vault object’s refcount hits zero during restore, it is **removed** (garbage collection).
+
+## Background Daemon (Linux Only)
+
+### Overview
+
+`bdstorage` can run continuously in the background using systemd to automatically deduplicate a specific folder (and all subfolders) at a set time interval.
+
+**Crucial Note:** installation uses `sudo` because systemd unit files are system-level, but `bdstorage` dynamically detects your account and configures the daemon to run with your normal user permissions. The daemon uses your normal `~/.imprint/` vault and state database, not a root vault.
+
+### Installation & Setup
+
+**Step 1: Install the service**
+
+```bash
+sudo bdstorage daemon install --target /path/to/watch --interval-secs 60
+```
+
+**Step 2: Note about Filesystems (IMPORTANT)**
+
+> **IMPORTANT:** If your target is on a standard filesystem like ext4 (no CoW reflinks), you must add `--allow-unsafe-hardlinks` to the install command. If you do not, the daemon intentionally skips deduplication on unsupported filesystems to protect your files.
+
+```bash
+sudo bdstorage daemon install --target /path/to/watch --interval-secs 60 --allow-unsafe-hardlinks
+```
+
+**Step 3: Enable and Start**
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now bdstorage-dedupe.service
+```
+
+### Configuring the Scan Interval
+
+Use `--interval-secs` to control how often the daemon wakes up and runs deduplication.
+
+**Short Intervals (e.g., 5 to 30 seconds)**
+
+- **Pros:** Near-instant deduplication. Files are linked and space is recovered almost immediately after you download or copy them.
+- **Cons:** Higher idle CPU usage and more frequent disk wake-ups, which can drain laptop batteries faster.
+
+**Long Intervals (e.g., 3600 seconds / 1 Hour)**
+
+- **Pros:** Extremely lightweight. Zero noticeable impact on system performance or battery life.
+- **Cons:** Temporary duplicate files will sit on your hard drive taking up wasted space until the hour is up and the next scan triggers.
+
+### Managing the Daemon
+
+**Check Status**
+
+```bash
+systemctl status bdstorage-dedupe.service
+```
+
+**Watch Live Logs**
+
+```bash
+journalctl -u bdstorage-dedupe.service -f
+```
+
+**Pause the Daemon**
+
+```bash
+sudo systemctl stop bdstorage-dedupe.service
+```
+
+**Permanently Disable & Stop**
+
+```bash
+sudo systemctl disable --now bdstorage-dedupe.service
+```
+
+### How to Verify it is Working
+
+Run `ls -l` inside your watched target folder.
+
+Check the **link count** column (the number after permissions):
+
+- `1` means the file has not been deduplicated yet.
+- `2` (or more) means the daemon successfully linked that file to the vault.
+
+### Known Limitations
+
+- This daemon flow is driven by systemd, so it is currently Linux-only.
+- The daemon only operates on the specific `--target` directory you configured, leaving the rest of your system untouched.
 
 ---
 
 ## Data Locations & Storage
 
-Your data never leaves your machine. `bdstorage` automatically provisions the following directories in your home folder:
+Your data never leaves your machine. `bdstorage` uses **`$HOME/.imprint/`** (from the **`HOME`** environment variable):
 
-* **State DB:** `~/.bdstorage/state.redb`
-* **CAS Vault:** `~/.bdstorage/store/`
+* **State DB:** `~/.imprint/state.redb`
+* **CAS Vault:** `~/.imprint/store/`
 
 To perform a completely clean reset of the engine:
 ```bash
-rm -f ~/.bdstorage/state.redb
-rm -rf ~/.bdstorage/store/
+rm -f ~/.imprint/state.redb
+rm -rf ~/.imprint/store/
 ```
 
 ---

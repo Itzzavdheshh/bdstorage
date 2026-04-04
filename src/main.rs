@@ -2,17 +2,19 @@ mod dedupe;
 mod hasher;
 mod scanner;
 mod state;
+mod systemd;
 mod types;
 mod vault;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use colored::*;
 use crossbeam::channel;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::state::DbOp;
 use crate::types::{FileMetadata, Hash};
@@ -24,11 +26,22 @@ use crate::types::{FileMetadata, Hash};
     version,
     about = "bdstorage: A speed-first, local file deduplication engine.",
     long_about = "bdstorage uses a Tiered Hashing philosophy to minimize I/O overhead:\n\nSize Grouping: Eliminates unique file sizes immediately.\n\nSparse Hashing: Samples 12KB (start/middle/end) to identify candidates.\n\nFull BLAKE3 Hashing: Verifies matches with high-performance 128KB buffering.",
-    help_template = "{before-help}{name} {version}\n{author-with-newline}{about-section}\n\nSTORAGE PATHS:\n  State DB: ~/.bdstorage/state.redb\n  CAS Vault: ~/.bdstorage/store\n\n{usage-heading} {usage}\n\nGLOBAL FLAGS:\n  -h, --help     Print help\n  -V, --version  Print version\n\nSUBCOMMAND FLAGS:\n  --paranoid                 Available on the dedupe subcommand. Forces a byte-for-byte\n                             verification before linking to guarantee 100% collision safety.\n\n  --allow-unsafe-hardlinks   Available on the dedupe subcommand. Allows hard link fallback\n                             when CoW reflinks are not supported. Hard links share the same\n                             inode, so all linked files will have identical metadata.\n\n  -n, --dry-run              Available on dedupe and restore subcommands. Simulates operations\n                             without modifying the filesystem or the database.\n\n{all-args}{after-help}"
+    help_template = "{before-help}{name} {version}\n{author-with-newline}{about-section}\n\nSTORAGE PATHS:\n  State DB: ~/.imprint/state.redb\n  CAS Vault: ~/.imprint/store\n\n{usage-heading} {usage}\n\nGLOBAL FLAGS:\n  -h, --help     Print help\n  -V, --version  Print version\n\nSUBCOMMAND FLAGS:\n  --paranoid                 Available on the dedupe subcommand. Forces a byte-for-byte\n                             verification before linking to guarantee 100% collision safety.\n\n  --allow-unsafe-hardlinks   Available on the dedupe subcommand. Allows hard link fallback\n                             when CoW reflinks are not supported. Hard links share the same\n                             inode, so all linked files will have identical metadata.\n\n  -n, --dry-run              Available on dedupe and restore subcommands. Simulates operations\n                             without modifying the filesystem or the database.\n\n{all-args}{after-help}"
 )]
-struct Args {
+struct Cli {
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(Args, Debug, Clone)]
+struct DedupeOptions {
+    path: PathBuf,
+    #[arg(long)]
+    paranoid: bool,
+    #[arg(long, short = 'n')]
+    dry_run: bool,
+    #[arg(long, action = clap::ArgAction::SetTrue, default_value_t = false)]
+    allow_unsafe_hardlinks: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -36,20 +49,49 @@ enum Commands {
     Scan {
         path: PathBuf,
     },
-    Dedupe {
-        path: PathBuf,
-        #[arg(long)]
-        paranoid: bool,
-        #[arg(long, short = 'n')]
-        dry_run: bool,
-        #[arg(long, action = clap::ArgAction::SetTrue, default_value_t = false)]
-        allow_unsafe_hardlinks: bool,
+    Dedupe(DedupeOptions),
+    #[command(about = "Daemon utilities: run periodic dedupe or install a systemd service unit.")]
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommand,
     },
     Restore {
         path: PathBuf,
         #[arg(long, short = 'n')]
         dry_run: bool,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum DaemonCommand {
+    #[command(about = "Periodically run dedupe until SIGINT or SIGTERM.")]
+    Run(DaemonRunOptions),
+    #[command(about = "Generate/install a systemd service for daemon mode.")]
+    Install(DaemonInstallOptions),
+}
+
+#[derive(Args, Debug, Clone)]
+struct DaemonRunOptions {
+    #[command(flatten)]
+    dedupe: DedupeOptions,
+    #[arg(long, default_value_t = 3600)]
+    interval_secs: u64,
+}
+
+#[derive(Args, Debug, Clone)]
+struct DaemonInstallOptions {
+    #[arg(long)]
+    target: PathBuf,
+    #[arg(long, default_value_t = 3600)]
+    interval_secs: u64,
+    #[arg(long, action = clap::ArgAction::SetTrue, default_value_t = false)]
+    allow_unsafe_hardlinks: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct DedupeRunSummary {
+    duplicate_groups: usize,
+    files_linked: usize,
 }
 
 fn main() {
@@ -60,7 +102,7 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let args = Args::parse();
+    let args = Cli::parse();
 
     match args.command {
         Commands::Scan { path } => {
@@ -68,21 +110,21 @@ fn run() -> Result<()> {
             let groups = scan_pipeline(&path, &state)?;
             print_summary("scan", &groups);
         }
-        Commands::Dedupe {
-            path,
-            paranoid,
-            dry_run,
-            allow_unsafe_hardlinks,
-        } => {
-            let state = if dry_run {
-                state::State::open_readonly_if_exists()?
-            } else {
-                state::State::open_default()?
-            };
-            let groups = scan_pipeline(&path, &state)?;
-            dedupe_groups(&groups, &state, paranoid, dry_run, allow_unsafe_hardlinks)?;
-            print_summary("dedupe", &groups);
+        Commands::Dedupe(opts) => {
+            let summary = run_dedupe_once(&opts)?;
+            println!(
+                "dedupe complete. duplicate groups: {} files linked: {}",
+                summary.duplicate_groups, summary.files_linked
+            );
         }
+        Commands::Daemon { command } => match command {
+            DaemonCommand::Run(opts) => run_daemon(opts.dedupe, opts.interval_secs)?,
+            DaemonCommand::Install(opts) => systemd::install_daemon_service(
+                &opts.target,
+                opts.interval_secs,
+                opts.allow_unsafe_hardlinks,
+            )?,
+        },
         Commands::Restore { path, dry_run } => {
             let state = if dry_run {
                 state::State::open_readonly_if_exists()?
@@ -93,6 +135,70 @@ fn run() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn run_dedupe_once(opts: &DedupeOptions) -> Result<DedupeRunSummary> {
+    let state = if opts.dry_run {
+        state::State::open_readonly_if_exists()?
+    } else {
+        state::State::open_default()?
+    };
+    let groups = scan_pipeline(&opts.path, &state)?;
+    dedupe_groups(
+        &groups,
+        &state,
+        opts.paranoid,
+        opts.dry_run,
+        opts.allow_unsafe_hardlinks,
+    )
+}
+
+fn run_daemon(opts: DedupeOptions, interval_secs: u64) -> Result<()> {
+    let (shutdown_tx, shutdown_rx) = channel::bounded::<()>(1);
+    ctrlc::set_handler(move || {
+        let _ = shutdown_tx.try_send(());
+    })
+    .context("register signal handler")?;
+
+    println!(
+        "[daemon] started; target={} interval_secs={interval_secs}",
+        opts.path.display()
+    );
+
+    let mut run_no: u64 = 1;
+    loop {
+        if shutdown_rx.try_recv().is_ok() {
+            break;
+        }
+
+        println!("[daemon] run #{run_no} started");
+        let started = std::time::Instant::now();
+        match run_dedupe_once(&opts) {
+            Ok(summary) => {
+                println!(
+                    "[daemon] run #{run_no} complete in {:.2}s; duplicate_groups={} files_linked={}",
+                    started.elapsed().as_secs_f64(),
+                    summary.duplicate_groups,
+                    summary.files_linked,
+                );
+            }
+            Err(err) => {
+                eprintln!(
+                    "[daemon] run #{run_no} failed in {:.2}s: {err:#}",
+                    started.elapsed().as_secs_f64()
+                );
+            }
+        }
+        run_no += 1;
+
+        match shutdown_rx.recv_timeout(Duration::from_secs(interval_secs)) {
+            Ok(_) | Err(channel::RecvTimeoutError::Disconnected) => break,
+            Err(channel::RecvTimeoutError::Timeout) => {}
+        }
+    }
+
+    println!("[daemon] stopped");
     Ok(())
 }
 
@@ -231,8 +337,10 @@ fn dedupe_groups(
     paranoid: bool,
     dry_run: bool,
     allow_unsafe_hardlinks: bool,
-) -> Result<()> {
+) -> Result<DedupeRunSummary> {
     let mut global_db_ops = Vec::new();
+    let mut files_linked = 0usize;
+    let duplicate_groups = groups.values().filter(|g| g.len() > 1).count();
     let mut reflink_warning_shown = false;
     let mut warn_reflink_unsupported = |name: &str| {
         if !reflink_warning_shown {
@@ -359,6 +467,7 @@ fn dedupe_groups(
                                 }
                             }
                         }
+                        files_linked += 1;
                     }
                 }
                 Ok(None) => {}
@@ -391,6 +500,7 @@ fn dedupe_groups(
                 name,
                 vault_path.display()
             );
+            files_linked += 1;
         }
 
         for path in paths.iter().skip(1) {
@@ -445,6 +555,7 @@ fn dedupe_groups(
                                 }
                             }
                         }
+                        files_linked += 1;
                     }
                     Ok(None) => {}
                     Err(e) => {
@@ -465,6 +576,7 @@ fn dedupe_groups(
                     name,
                     vault_path.display()
                 );
+                files_linked += 1;
             }
         }
 
@@ -487,7 +599,10 @@ fn dedupe_groups(
     if !dry_run && !global_db_ops.is_empty() {
         state.batch_write(global_db_ops)?;
     }
-    Ok(())
+    Ok(DedupeRunSummary {
+        duplicate_groups,
+        files_linked,
+    })
 }
 
 fn display_name(path: &Path) -> String {

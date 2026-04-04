@@ -31,13 +31,13 @@ fn run_cmd(home_dir: &Path, args: &[&str]) -> assert_cmd::Command {
     let mut cmd = Command::new(
         std::env::current_exe()
             .ok()
-            .and_then(|mut exe| {
+            .map(|mut exe| {
                 exe.pop();
                 if exe.ends_with("deps") {
                     exe.pop();
                 }
                 exe.push("bdstorage");
-                Some(exe)
+                exe
             })
             .expect("Failed to find bdstorage binary"),
     );
@@ -81,7 +81,7 @@ fn test_happy_path_dedupe_and_restore() {
     restore_cmd.assert().success();
 
     let restored_content =
-        fs::read(&target.join("dup_0.txt")).expect("Failed to read restored file");
+        fs::read(target.join("dup_0.txt")).expect("Failed to read restored file");
     assert_eq!(
         restored_content, b"identical content",
         "Restored file content should match original"
@@ -254,20 +254,16 @@ fn test_hardlink_fallback() {
     );
     dedupe_cmd.assert().success();
 
-    let file1_meta =
-        fs::metadata(&target.join("file1.txt")).expect("Failed to read file1 metadata");
-    let file2_meta =
-        fs::metadata(&target.join("file2.txt")).expect("Failed to read file2 metadata");
+    let file1_meta = fs::metadata(target.join("file1.txt")).expect("Failed to read file1 metadata");
+    let file2_meta = fs::metadata(target.join("file2.txt")).expect("Failed to read file2 metadata");
 
     let file1_inode = file1_meta.ino();
     let file2_inode = file2_meta.ino();
 
     if file1_inode == file2_inode {
-        // Hardlink successful
     } else {
-        // Reflink used instead (filesystem natively supports CoW)
-        let file1_content = fs::read(&target.join("file1.txt")).expect("Failed to read file1");
-        let file2_content = fs::read(&target.join("file2.txt")).expect("Failed to read file2");
+        let file1_content = fs::read(target.join("file1.txt")).expect("Failed to read file1");
+        let file2_content = fs::read(target.join("file2.txt")).expect("Failed to read file2");
         assert_eq!(
             file1_content, file2_content,
             "Fallback failed: file contents do not match"
@@ -292,8 +288,7 @@ fn test_paranoid_mode_catches_bit_rot() {
     let vault_file = walkdir::WalkDir::new(&vault)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .next();
+        .find(|e| e.file_type().is_file());
 
     if let Some(vault_entry) = vault_file {
         let vault_path = vault_entry.path().to_path_buf();
@@ -335,13 +330,13 @@ fn test_scan_no_modifications() {
     create_file_with_content(&target, "file1.txt", b"test");
     create_file_with_content(&target, "file2.txt", b"test");
 
-    let metadata_before = fs::metadata(&target.join("file1.txt")).expect("Failed to read metadata");
+    let metadata_before = fs::metadata(target.join("file1.txt")).expect("Failed to read metadata");
 
     let mut scan_cmd = run_cmd(home, &["scan", &target.to_string_lossy()]);
     scan_cmd.assert().success();
 
     let metadata_after =
-        fs::metadata(&target.join("file1.txt")).expect("Failed to read metadata after scan");
+        fs::metadata(target.join("file1.txt")).expect("Failed to read metadata after scan");
 
     assert_eq!(
         metadata_before.modified().unwrap(),
@@ -360,14 +355,14 @@ fn test_dry_run_no_changes() {
     create_file_with_content(&target, "file1.txt", b"test");
     create_file_with_content(&target, "file2.txt", b"test");
 
-    let inode_before = fs::metadata(&target.join("file1.txt"))
+    let inode_before = fs::metadata(target.join("file1.txt"))
         .expect("Failed to read inode")
         .ino();
 
     let mut cmd = run_cmd(home, &["dedupe", &target.to_string_lossy(), "--dry-run"]);
     cmd.assert().success();
 
-    let inode_after = fs::metadata(&target.join("file1.txt"))
+    let inode_after = fs::metadata(target.join("file1.txt"))
         .expect("Failed to read inode after dry-run")
         .ino();
 

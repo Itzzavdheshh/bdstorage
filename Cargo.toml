@@ -1,6 +1,6 @@
 [package]
 name = "bdstorage"
-version = "0.1.2"
+version = "1.0.1"
 edition = "2024"
 description = "A speed-first local data deduplication engine using tiered BLAKE3 hashing."
 license = "Apache-2.0"
@@ -20,10 +20,12 @@ blake3 = "1"
 bincode = "1"
 clap = { version = "4", features = ["derive"] }
 colored = "2"
+ctrlc = "3"
 crossbeam = "0.8"
 filetime = "0.2"
 indicatif = "0.17"
 jwalk = "0.8"
+libc = "0.2"
 nix = { version = "0.27", features = ["ioctl"], optional = true }
 rayon = "1"
 redb = "2"

@@ -144,8 +144,8 @@ Use **`bdstorage --help`** and **`bdstorage <subcommand> --help`** for the full 
 
 | Step | Command | What you get |
 |:---|:---|:---|
-| 1 (optional) | `bdstorage scan /path/to/tree` | Same walk + hash + DB indexing as dedupe, and prints duplicate **group** count; does **not** vault files or create links. |
-| 2 (recommended) | `bdstorage dedupe /path/to/tree -n` | Same logic as a real dedupe, but only prints what **would** happen. |
+| 1  | `bdstorage scan /path/to/tree` | Same walk + hash + DB indexing as dedupe, and prints duplicate **group** count; does **not** vault files or create links. |
+| 2  | `bdstorage dedupe /path/to/tree -n` | Same logic as a real dedupe, but only prints what **would** happen. |
 | 3 | `bdstorage dedupe /path/to/tree` | Vaults one copy per duplicate group and replaces the rest with reflinks (or hard links if allowed). |
 | 4 (optional) | `bdstorage daemon run /path/to/tree --interval-secs 3600` | Repeats step 3 on an interval; see [Background Daemon](#background-daemon-linux-only). |
 | If you need originals back | `bdstorage restore /path/to/tree` | Copies data back from the vault and breaks links; see restore flags below. |

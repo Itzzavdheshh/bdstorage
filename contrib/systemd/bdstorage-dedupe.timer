@@ -1,0 +1,12 @@
+# Scheduled dedupe without a long-running daemon. Disable bdstorage-dedupe.service if you use this.
+
+[Unit]
+Description=Timer for bdstorage dedupe
+
+[Timer]
+OnCalendar=daily
+Unit=bdstorage-dedupe-once.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -6,13 +6,17 @@ mod types;
 mod vault;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use colored::*;
 use crossbeam::channel;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::state::DbOp;
 use crate::types::{FileMetadata, Hash};
@@ -31,19 +35,30 @@ struct Args {
     command: Commands,
 }
 
+#[derive(Args, Debug, Clone)]
+struct DedupeOptions {
+    path: PathBuf,
+    #[arg(long)]
+    paranoid: bool,
+    #[arg(long, short = 'n')]
+    dry_run: bool,
+    #[arg(long, action = clap::ArgAction::SetTrue, default_value_t = false)]
+    allow_unsafe_hardlinks: bool,
+}
+
 #[derive(Subcommand, Debug)]
 enum Commands {
     Scan {
         path: PathBuf,
     },
-    Dedupe {
-        path: PathBuf,
-        #[arg(long)]
-        paranoid: bool,
-        #[arg(long, short = 'n')]
-        dry_run: bool,
-        #[arg(long, action = clap::ArgAction::SetTrue, default_value_t = false)]
-        allow_unsafe_hardlinks: bool,
+    Dedupe(DedupeOptions),
+    /// Periodically run `dedupe` on PATH until SIGINT or SIGTERM (sleep is interruptible).
+    Daemon {
+        #[command(flatten)]
+        dedupe: DedupeOptions,
+        /// Seconds to wait after each dedupe run before starting the next.
+        #[arg(long, default_value_t = 3600)]
+        interval_secs: u64,
     },
     Restore {
         path: PathBuf,
@@ -68,20 +83,27 @@ fn run() -> Result<()> {
             let groups = scan_pipeline(&path, &state)?;
             print_summary("scan", &groups);
         }
-        Commands::Dedupe {
-            path,
-            paranoid,
-            dry_run,
-            allow_unsafe_hardlinks,
-        } => {
-            let state = if dry_run {
+        Commands::Dedupe(opts) => {
+            let state = if opts.dry_run {
                 state::State::open_readonly_if_exists()?
             } else {
                 state::State::open_default()?
             };
-            let groups = scan_pipeline(&path, &state)?;
-            dedupe_groups(&groups, &state, paranoid, dry_run, allow_unsafe_hardlinks)?;
+            let groups = scan_pipeline(&opts.path, &state)?;
+            dedupe_groups(
+                &groups,
+                &state,
+                opts.paranoid,
+                opts.dry_run,
+                opts.allow_unsafe_hardlinks,
+            )?;
             print_summary("dedupe", &groups);
+        }
+        Commands::Daemon {
+            dedupe,
+            interval_secs,
+        } => {
+            run_daemon(dedupe, interval_secs)?;
         }
         Commands::Restore { path, dry_run } => {
             let state = if dry_run {
@@ -93,6 +115,64 @@ fn run() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn daemon_log(msg: &str) {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    eprintln!("[bdstorage-daemon {ts}] {msg}");
+}
+
+fn run_daemon(opts: DedupeOptions, interval_secs: u64) -> Result<()> {
+    let exe = std::env::current_exe().context("resolve current executable")?;
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+    ctrlc::set_handler(move || {
+        r.store(false, Ordering::SeqCst);
+    })
+    .context("register signal handler")?;
+
+    daemon_log(&format!(
+        "started; target={} interval_secs={interval_secs}",
+        opts.path.display()
+    ));
+
+    while running.load(Ordering::SeqCst) {
+        daemon_log("starting dedupe run");
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.arg("dedupe");
+        cmd.arg(&opts.path);
+        if opts.paranoid {
+            cmd.arg("--paranoid");
+        }
+        if opts.dry_run {
+            cmd.arg("-n");
+        }
+        if opts.allow_unsafe_hardlinks {
+            cmd.arg("--allow-unsafe-hardlinks");
+        }
+        match cmd.status() {
+            Ok(status) if status.success() => {}
+            Ok(status) => {
+                daemon_log(&format!("dedupe exited with {status}"));
+            }
+            Err(e) => {
+                daemon_log(&format!("failed to spawn dedupe: {e}"));
+            }
+        }
+
+        for _ in 0..interval_secs {
+            if !running.load(Ordering::SeqCst) {
+                break;
+            }
+            thread::sleep(Duration::from_secs(1));
+        }
+    }
+
+    daemon_log("stopped");
     Ok(())
 }
 

@@ -20,6 +20,7 @@ blake3 = "1"
 bincode = "1"
 clap = { version = "4", features = ["derive"] }
 colored = "2"
+ctrlc = "3"
 crossbeam = "0.8"
 filetime = "0.2"
 indicatif = "0.17"

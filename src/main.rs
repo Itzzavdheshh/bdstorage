@@ -119,13 +119,11 @@ fn run() -> Result<()> {
         }
         Commands::Daemon { command } => match command {
             DaemonCommand::Run(opts) => run_daemon(opts.dedupe, opts.interval_secs)?,
-            DaemonCommand::Install(opts) => {
-                systemd::install_daemon_service(
-                    &opts.target,
-                    opts.interval_secs,
-                    opts.allow_unsafe_hardlinks,
-                )?
-            }
+            DaemonCommand::Install(opts) => systemd::install_daemon_service(
+                &opts.target,
+                opts.interval_secs,
+                opts.allow_unsafe_hardlinks,
+            )?,
         },
         Commands::Restore { path, dry_run } => {
             let state = if dry_run {

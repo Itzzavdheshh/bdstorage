@@ -1,5 +1,0 @@
-# Merge into /etc/wsl.conf inside Ubuntu (WSL), then run `wsl --shutdown` from Windows
-# and reopen the distro so systemd can start. Required for systemctl --user.
-
-[boot]
-systemd=true

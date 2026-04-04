@@ -16,10 +16,16 @@
    - [Typical workflow](#typical-workflow)
    - [What one `dedupe` run does](#what-one-dedupe-run-does)
    - [Commands and flags](#commands-and-flags)
-   - [Schedules: daemon and systemd](#schedules-daemon-and-systemd)
-6. [Data Locations & Storage](#-data-locations--storage)
-7. [Safety Guarantees](#-safety-guarantees)
-8. [License](#-license)
+6. [Background Daemon (Linux Only)](#background-daemon-linux-only)
+   - [Overview](#overview)
+   - [Installation & Setup](#installation--setup)
+   - [Configuring the Scan Interval](#configuring-the-scan-interval)
+   - [Managing the Daemon](#managing-the-daemon)
+   - [How to Verify it is Working](#how-to-verify-it-is-working)
+   - [Known Limitations](#known-limitations)
+7. [Data Locations & Storage](#-data-locations--storage)
+8. [Safety Guarantees](#-safety-guarantees)
+9. [License](#-license)
 
 ---
 
@@ -141,7 +147,7 @@ Use **`bdstorage --help`** and **`bdstorage <subcommand> --help`** for the full 
 | 1 (optional) | `bdstorage scan /path/to/tree` | Same walk + hash + DB indexing as dedupe, and prints duplicate **group** count; does **not** vault files or create links. |
 | 2 (recommended) | `bdstorage dedupe /path/to/tree -n` | Same logic as a real dedupe, but only prints what **would** happen. |
 | 3 | `bdstorage dedupe /path/to/tree` | Vaults one copy per duplicate group and replaces the rest with reflinks (or hard links if allowed). |
-| 4 (optional) | `bdstorage daemon /path/to/tree --interval-secs 3600` | Repeats step 3 on an interval; see [Schedules](#schedules-daemon-and-systemd). |
+| 4 (optional) | `bdstorage daemon run /path/to/tree --interval-secs 3600` | Repeats step 3 on an interval; see [Background Daemon](#background-daemon-linux-only). |
 | If you need originals back | `bdstorage restore /path/to/tree` | Copies data back from the vault and breaks links; see restore flags below. |
 
 Run **`restore`** when you want independent file copies again (for example before migrating data off the machine or when you no longer want shared extents).
@@ -191,18 +197,90 @@ bdstorage restore /path/to/directory
 
 When a vault object’s refcount hits zero during restore, it is **removed** (garbage collection).
 
-### Schedules: daemon and systemd
+## Background Daemon (Linux Only)
 
-**Foreground daemon** — the **`daemon`** subcommand runs in a loop: start a **child** `bdstorage dedupe <path>` (same as you would by hand), wait **`--interval-secs`** (default **3600**), repeat. Waits are interruptible so **SIGINT** / **SIGTERM** stop quickly. Logs on stderr as `[bdstorage-daemon …]`. Same flags as **`dedupe`** (`--paranoid`, `-n`, `--allow-unsafe-hardlinks`).
+### Overview
+
+`bdstorage` can run continuously in the background using systemd to automatically deduplicate a specific folder (and all subfolders) at a set time interval.
+
+**Crucial Note:** installation uses `sudo` because systemd unit files are system-level, but `bdstorage` dynamically detects your account and configures the daemon to run with your normal user permissions. The daemon uses your normal `~/.imprint/` vault and state database, not a root vault.
+
+### Installation & Setup
+
+**Step 1: Install the service**
 
 ```bash
-bdstorage daemon /srv/data --interval-secs 86400
-bdstorage daemon /srv/media --paranoid --interval-secs 3600
+sudo bdstorage daemon install --target /path/to/watch --interval-secs 60
 ```
 
-**Bare metal (systemd)** — dedicated **`bdstorage`** user, **`/usr/local/bin/bdstorage`**, **`/etc/bdstorage.env`**: step-by-step commands and unit files in **[`contrib/systemd/README.md`](contrib/systemd/README.md)**. Either enable **`bdstorage-dedupe.service`** (uses **`daemon`**) or **`bdstorage-dedupe.timer`** + **`bdstorage-dedupe-once.service`** (scheduled **`dedupe`** only). Do not enable both for the same tree unless you want overlapping runs.
+**Step 2: Note about Filesystems (IMPORTANT)**
 
-**WSL2 (Ubuntu)** — user units and **`/etc/wsl.conf`** **`systemd=true`**: **[`contrib/wsl/README.md`](contrib/wsl/README.md)**.
+> **IMPORTANT:** If your target is on a standard filesystem like ext4 (no CoW reflinks), you must add `--allow-unsafe-hardlinks` to the install command. If you do not, the daemon intentionally skips deduplication on unsupported filesystems to protect your files.
+
+```bash
+sudo bdstorage daemon install --target /path/to/watch --interval-secs 60 --allow-unsafe-hardlinks
+```
+
+**Step 3: Enable and Start**
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now bdstorage-dedupe.service
+```
+
+### Configuring the Scan Interval
+
+Use `--interval-secs` to control how often the daemon wakes up and runs deduplication.
+
+**Short Intervals (e.g., 5 to 30 seconds)**
+
+- **Pros:** Near-instant deduplication. Files are linked and space is recovered almost immediately after you download or copy them.
+- **Cons:** Higher idle CPU usage and more frequent disk wake-ups, which can drain laptop batteries faster.
+
+**Long Intervals (e.g., 3600 seconds / 1 Hour)**
+
+- **Pros:** Extremely lightweight. Zero noticeable impact on system performance or battery life.
+- **Cons:** Temporary duplicate files will sit on your hard drive taking up wasted space until the hour is up and the next scan triggers.
+
+### Managing the Daemon
+
+**Check Status**
+
+```bash
+systemctl status bdstorage-dedupe.service
+```
+
+**Watch Live Logs**
+
+```bash
+journalctl -u bdstorage-dedupe.service -f
+```
+
+**Pause the Daemon**
+
+```bash
+sudo systemctl stop bdstorage-dedupe.service
+```
+
+**Permanently Disable & Stop**
+
+```bash
+sudo systemctl disable --now bdstorage-dedupe.service
+```
+
+### How to Verify it is Working
+
+Run `ls -l` inside your watched target folder.
+
+Check the **link count** column (the number after permissions):
+
+- `1` means the file has not been deduplicated yet.
+- `2` (or more) means the daemon successfully linked that file to the vault.
+
+### Known Limitations
+
+- This daemon flow is driven by systemd, so it is currently Linux-only.
+- The daemon only operates on the specific `--target` directory you configured, leaving the rest of your system untouched.
 
 ---
 

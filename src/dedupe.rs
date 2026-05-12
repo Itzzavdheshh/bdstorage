@@ -60,7 +60,9 @@ pub fn replace_with_link(
             let target_permissions = target_meta.permissions();
             let target_mtime = FileTime::from_last_modification_time(&target_meta);
 
+            #[cfg(not(windows))]
             let mut target_xattrs: Vec<(OsString, Vec<u8>)> = Vec::new();
+            #[cfg(not(windows))]
             if let Ok(attrs) = xattr::list(target) {
                 for attr_name in attrs {
                     if let Ok(Some(attr_value)) = xattr::get(target, &attr_name) {
@@ -72,7 +74,10 @@ pub fn replace_with_link(
             std::fs::rename(&temp, target).with_context(|| "replace target with reflink")?;
             cleanup.disarm();
 
+            #[cfg(not(windows))]
             apply_metadata(target, &target_permissions, target_mtime, &target_xattrs)?;
+            #[cfg(windows)]
+            apply_metadata(target, &target_permissions, target_mtime)?;
 
             Ok(Some(LinkType::Reflink))
         }
@@ -100,13 +105,14 @@ fn apply_metadata(
     path: &Path,
     permissions: &std::fs::Permissions,
     mtime: FileTime,
-    xattrs: &[(OsString, Vec<u8>)],
+    #[cfg(not(windows))] xattrs: &[(OsString, Vec<u8>)],
 ) -> Result<()> {
     std::fs::set_permissions(path, permissions.clone())
         .with_context(|| "restore file permissions")?;
 
     filetime::set_file_mtime(path, mtime).with_context(|| "restore file mtime")?;
 
+    #[cfg(not(windows))]
     for (attr_name, attr_value) in xattrs {
         let _ = xattr::set(path, attr_name, attr_value);
     }
@@ -147,7 +153,9 @@ pub fn restore_file(target: &Path) -> Result<()> {
     let target_permissions = target_meta.permissions();
     let target_mtime = FileTime::from_last_modification_time(&target_meta);
 
+    #[cfg(not(windows))]
     let mut target_xattrs: Vec<(OsString, Vec<u8>)> = Vec::new();
+    #[cfg(not(windows))]
     if let Ok(attrs) = xattr::list(target) {
         for attr_name in attrs {
             if let Ok(Some(attr_value)) = xattr::get(target, &attr_name) {
@@ -173,7 +181,10 @@ pub fn restore_file(target: &Path) -> Result<()> {
     std::fs::rename(&temp, target).with_context(|| "replace target with restored copy")?;
     cleanup.disarm();
 
+    #[cfg(not(windows))]
     apply_metadata(target, &target_permissions, target_mtime, &target_xattrs)?;
+    #[cfg(windows)]
+    apply_metadata(target, &target_permissions, target_mtime)?;
 
     Ok(())
 }

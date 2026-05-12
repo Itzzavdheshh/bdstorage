@@ -107,6 +107,13 @@ When identical files are confirmed, `bdstorage` uses a **Content-Addressable Sto
 * **Filesystem:** For maximum performance and safety, a filesystem that supports **reflinks** (e.g., Btrfs, XFS) is strongly recommended.
 * **Rust:** Latest stable toolchain (if building from source).
 
+### ZFS Support
+`bdstorage` supports **OpenZFS 2.2+** native block-cloning. 
+
+* **OpenZFS 2.2 and newer:** Supports native CoW reflinks. `bdstorage` will automatically use `LinkType::Reflink` for instant, space-efficient deduplication while preserving independent file metadata (timestamps, permissions).
+* **OpenZFS < 2.2:** Does not support explicit block-cloning. By default, `bdstorage` will skip these files and report that reflinks are not supported.
+* **Workaround for older ZFS:** If you are on an older version of ZFS and want to save space, use the `--allow-unsafe-hardlinks` flag. **Warning:** This uses hard links, meaning all duplicates will share the same inode and metadata. Modifying one copy will affect all others.
+
 ---
 
 ## Installation

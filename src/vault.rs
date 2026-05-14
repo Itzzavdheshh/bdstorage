@@ -30,7 +30,9 @@ impl Drop for TempCleanup {
 }
 
 pub fn vault_root() -> Result<PathBuf> {
-    let home = std::env::var("HOME").with_context(|| "HOME not set")?;
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .with_context(|| "Neither HOME nor USERPROFILE is set")?;
     Ok(PathBuf::from(home).join(".imprint").join("store"))
 }
 

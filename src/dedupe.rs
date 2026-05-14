@@ -5,6 +5,9 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
+#[cfg(not(windows))]
+use xattr;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkType {
     Reflink,
@@ -60,13 +63,14 @@ pub fn replace_with_link(
             let target_permissions = target_meta.permissions();
             let target_mtime = FileTime::from_last_modification_time(&target_meta);
 
+            let mut _target_xattrs: Vec<(OsString, Vec<u8>)> = Vec::new();
             #[cfg(not(windows))]
-            let mut target_xattrs: Vec<(OsString, Vec<u8>)> = Vec::new();
-            #[cfg(not(windows))]
-            if let Ok(attrs) = xattr::list(target) {
-                for attr_name in attrs {
-                    if let Ok(Some(attr_value)) = xattr::get(target, &attr_name) {
-                        target_xattrs.push((attr_name, attr_value));
+            {
+                if let Ok(attrs) = xattr::list(target) {
+                    for attr_name in attrs {
+                        if let Ok(Some(attr_value)) = xattr::get(target, &attr_name) {
+                            _target_xattrs.push((attr_name, attr_value));
+                        }
                     }
                 }
             }
@@ -75,7 +79,7 @@ pub fn replace_with_link(
             cleanup.disarm();
 
             #[cfg(not(windows))]
-            apply_metadata(target, &target_permissions, target_mtime, &target_xattrs)?;
+            apply_metadata(target, &target_permissions, target_mtime, &_target_xattrs)?;
             #[cfg(windows)]
             apply_metadata(target, &target_permissions, target_mtime)?;
 
@@ -153,13 +157,14 @@ pub fn restore_file(target: &Path) -> Result<()> {
     let target_permissions = target_meta.permissions();
     let target_mtime = FileTime::from_last_modification_time(&target_meta);
 
+    let mut _target_xattrs: Vec<(OsString, Vec<u8>)> = Vec::new();
     #[cfg(not(windows))]
-    let mut target_xattrs: Vec<(OsString, Vec<u8>)> = Vec::new();
-    #[cfg(not(windows))]
-    if let Ok(attrs) = xattr::list(target) {
-        for attr_name in attrs {
-            if let Ok(Some(attr_value)) = xattr::get(target, &attr_name) {
-                target_xattrs.push((attr_name, attr_value));
+    {
+        if let Ok(attrs) = xattr::list(target) {
+            for attr_name in attrs {
+                if let Ok(Some(attr_value)) = xattr::get(target, &attr_name) {
+                    _target_xattrs.push((attr_name, attr_value));
+                }
             }
         }
     }
@@ -182,7 +187,7 @@ pub fn restore_file(target: &Path) -> Result<()> {
     cleanup.disarm();
 
     #[cfg(not(windows))]
-    apply_metadata(target, &target_permissions, target_mtime, &target_xattrs)?;
+    apply_metadata(target, &target_permissions, target_mtime, &_target_xattrs)?;
     #[cfg(windows)]
     apply_metadata(target, &target_permissions, target_mtime)?;
 

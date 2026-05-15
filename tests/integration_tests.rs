@@ -464,14 +464,19 @@ fn test_json_output_acceptance() {
     assert_eq!(json_scan["files_scanned"], 2);
     assert_eq!(json_scan["duplicate_groups"], 1);
 
-    // Test dry-run JSON
+    // Test dry-run JSON on a fresh set of duplicates
+    let dry_run_target = home.join("dry_run_data");
+    fs::create_dir(&dry_run_target).expect("Failed to create dry-run target directory");
+    create_file_with_content(&dry_run_target, "dry1.txt", b"1234");
+    create_file_with_content(&dry_run_target, "dry2.txt", b"1234");
+
     let mut cmd_dry = run_cmd(
         home,
         &[
             "--output-format",
             "json",
             "dedupe",
-            &target.to_string_lossy(),
+            &dry_run_target.to_string_lossy(),
             "--dry-run",
         ],
     );

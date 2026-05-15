@@ -5,9 +5,6 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
-#[cfg(not(windows))]
-use xattr;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkType {
     Reflink,

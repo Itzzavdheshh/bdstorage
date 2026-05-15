@@ -441,10 +441,20 @@ fn test_json_output_acceptance() {
     assert_eq!(json["links_created"], 2);
     assert_eq!(json["vault_objects_added"], 1);
 
-    // Test scan JSON
+    let scan_target = home.join("scan_data");
+    fs::create_dir(&scan_target).expect("Failed to create scan target directory");
+    create_file_with_content(&scan_target, "scan1.txt", b"scan duplicate");
+    create_file_with_content(&scan_target, "scan2.txt", b"scan duplicate");
+
+    // Test scan JSON on files that have not already been deduplicated.
     let mut cmd_scan = run_cmd(
         home,
-        &["--output-format", "json", "scan", &target.to_string_lossy()],
+        &[
+            "--output-format",
+            "json",
+            "scan",
+            &scan_target.to_string_lossy(),
+        ],
     );
     let output_scan = cmd_scan.assert().success().get_output().stdout.clone();
     let json_scan_str = String::from_utf8_lossy(&output_scan);

@@ -1,8 +1,11 @@
 use assert_cmd::Command;
 use std::fs;
 use std::io::{Seek, SeekFrom, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use xattr;
 
 fn setup_env() -> tempfile::TempDir {
     tempfile::TempDir::new().expect("Failed to create temp directory")
@@ -36,16 +39,37 @@ fn run_cmd(home_dir: &Path, args: &[&str]) -> assert_cmd::Command {
                 if exe.ends_with("deps") {
                     exe.pop();
                 }
+                #[cfg(windows)]
+                exe.push("bdstorage.exe");
+                #[cfg(not(windows))]
                 exe.push("bdstorage");
                 exe
             })
             .expect("Failed to find bdstorage binary"),
     );
+    #[cfg(windows)]
+    cmd.env("USERPROFILE", home_dir);
+    #[cfg(not(windows))]
     cmd.env("HOME", home_dir);
     for arg in args {
         cmd.arg(arg);
     }
     cmd
+}
+
+fn get_inode(metadata: &fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    return metadata.ino();
+    #[cfg(windows)]
+    {
+        let _ = metadata;
+        0
+    }
+}
+
+#[cfg(unix)]
+fn get_mode(metadata: &fs::Metadata) -> u32 {
+    metadata.permissions().mode() & 0o777
 }
 
 #[test]
@@ -196,12 +220,17 @@ fn test_metadata_integrity() {
     let _master_path = create_file_with_content(&target, "master.txt", b"test content");
     let dup_path = create_file_with_content(&target, "duplicate.txt", b"test content");
 
-    fs::set_permissions(&dup_path, fs::Permissions::from_mode(0o444))
-        .expect("Failed to set permissions");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&dup_path, fs::Permissions::from_mode(0o444))
+            .expect("Failed to set permissions");
+    }
 
     let test_time = filetime::FileTime::from_unix_time(1000000000, 0);
     filetime::set_file_mtime(&dup_path, test_time).expect("Failed to set mtime");
 
+    #[cfg(unix)]
     if xattr::set(&dup_path, "user.test_attr", b"test_value").is_err() {
         eprintln!("Skipping xattr test: filesystem does not support extended attributes");
         return;
@@ -218,20 +247,23 @@ fn test_metadata_integrity() {
         "Modification time should be preserved"
     );
 
-    let dup_perms = dup_meta.permissions();
-    let dup_mode = dup_perms.mode() & 0o777;
-    assert_eq!(
-        dup_mode, 0o444,
-        "Permissions should be preserved as read-only (0o444)"
-    );
+    #[cfg(unix)]
+    {
+        let _dup_perms = dup_meta.permissions();
+        let dup_mode = get_mode(&dup_meta);
+        assert_eq!(
+            dup_mode, 0o444,
+            "Permissions should be preserved as read-only (0o444)"
+        );
 
-    let attr_val = xattr::get(&dup_path, "user.test_attr")
-        .expect("Filesystem does not support xattr during test")
-        .expect("xattr was completely stripped during deduplication");
-    assert_eq!(
-        attr_val, b"test_value",
-        "Extended attribute value corrupted"
-    );
+        let attr_val = xattr::get(&dup_path, "user.test_attr")
+            .expect("Filesystem does not support xattr during test")
+            .expect("xattr was completely stripped during deduplication");
+        assert_eq!(
+            attr_val, b"test_value",
+            "Extended attribute value corrupted"
+        );
+    }
 }
 
 #[test]
@@ -257,8 +289,8 @@ fn test_hardlink_fallback() {
     let file1_meta = fs::metadata(target.join("file1.txt")).expect("Failed to read file1 metadata");
     let file2_meta = fs::metadata(target.join("file2.txt")).expect("Failed to read file2 metadata");
 
-    let file1_inode = file1_meta.ino();
-    let file2_inode = file2_meta.ino();
+    let file1_inode = get_inode(&file1_meta);
+    let file2_inode = get_inode(&file2_meta);
 
     if file1_inode == file2_inode {
     } else {
@@ -355,16 +387,15 @@ fn test_dry_run_no_changes() {
     create_file_with_content(&target, "file1.txt", b"test");
     create_file_with_content(&target, "file2.txt", b"test");
 
-    let inode_before = fs::metadata(target.join("file1.txt"))
-        .expect("Failed to read inode")
-        .ino();
+    let inode_before =
+        get_inode(&fs::metadata(target.join("file1.txt")).expect("Failed to read inode"));
 
     let mut cmd = run_cmd(home, &["dedupe", &target.to_string_lossy(), "--dry-run"]);
     cmd.assert().success();
 
-    let inode_after = fs::metadata(target.join("file1.txt"))
-        .expect("Failed to read inode after dry-run")
-        .ino();
+    let inode_after = get_inode(
+        &fs::metadata(target.join("file1.txt")).expect("Failed to read inode after dry-run"),
+    );
 
     assert_eq!(
         inode_before, inode_after,
@@ -376,4 +407,87 @@ fn test_dry_run_no_changes() {
         !imprint_dir.exists(),
         "Entire .imprint directory (vault and database) must not exist in dry-run mode"
     );
+}
+
+#[test]
+fn test_json_output_acceptance() {
+    let temp_dir = setup_env();
+    let home = temp_dir.path();
+    let target = home.join("data");
+    fs::create_dir(&target).expect("Failed to create target directory");
+
+    create_file_with_content(&target, "file1.txt", b"1234");
+    create_file_with_content(&target, "file2.txt", b"1234");
+
+    // Test dedupe JSON
+    let mut cmd = run_cmd(
+        home,
+        &[
+            "--output-format",
+            "json",
+            "dedupe",
+            &target.to_string_lossy(),
+            "--allow-unsafe-hardlinks",
+        ],
+    );
+    let output = cmd.assert().success().get_output().stdout.clone();
+    let json_str = String::from_utf8_lossy(&output);
+    let json: serde_json::Value =
+        serde_json::from_str(&json_str).expect("Failed to parse dedupe JSON output");
+
+    assert_eq!(json["files_scanned"], 2);
+    assert_eq!(json["duplicate_groups"], 1);
+    assert_eq!(json["bytes_saved"], 4);
+    assert_eq!(json["links_created"], 2);
+    assert_eq!(json["vault_objects_added"], 1);
+
+    let scan_target = home.join("scan_data");
+    fs::create_dir(&scan_target).expect("Failed to create scan target directory");
+    create_file_with_content(&scan_target, "scan1.txt", b"scan duplicate");
+    create_file_with_content(&scan_target, "scan2.txt", b"scan duplicate");
+
+    // Test scan JSON on files that have not already been deduplicated.
+    let mut cmd_scan = run_cmd(
+        home,
+        &[
+            "--output-format",
+            "json",
+            "scan",
+            &scan_target.to_string_lossy(),
+        ],
+    );
+    let output_scan = cmd_scan.assert().success().get_output().stdout.clone();
+    let json_scan_str = String::from_utf8_lossy(&output_scan);
+    let json_scan: serde_json::Value =
+        serde_json::from_str(&json_scan_str).expect("Failed to parse scan JSON output");
+
+    assert_eq!(json_scan["files_scanned"], 2);
+    assert_eq!(json_scan["duplicate_groups"], 1);
+
+    // Test dry-run JSON on a fresh set of duplicates
+    let dry_run_target = home.join("dry_run_data");
+    fs::create_dir(&dry_run_target).expect("Failed to create dry-run target directory");
+    create_file_with_content(&dry_run_target, "dry1.txt", b"1234");
+    create_file_with_content(&dry_run_target, "dry2.txt", b"1234");
+
+    let mut cmd_dry = run_cmd(
+        home,
+        &[
+            "--output-format",
+            "json",
+            "dedupe",
+            &dry_run_target.to_string_lossy(),
+            "--dry-run",
+        ],
+    );
+    let output_dry = cmd_dry.assert().success().get_output().stdout.clone();
+    let json_dry_str = String::from_utf8_lossy(&output_dry);
+    let json_dry: serde_json::Value =
+        serde_json::from_str(&json_dry_str).expect("Failed to parse dry-run JSON output");
+
+    assert_eq!(json_dry["files_scanned"], 2);
+    assert_eq!(json_dry["duplicate_groups"], 1);
+    assert_eq!(json_dry["bytes_saved"], 4);
+    assert_eq!(json_dry["links_created"], 2);
+    assert_eq!(json_dry["vault_objects_added"], 0);
 }

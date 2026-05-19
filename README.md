@@ -156,6 +156,7 @@ Use **`bdstorage --help`** and **`bdstorage <subcommand> --help`** for the full 
 | 3 | `bdstorage dedupe /path/to/tree` | Vaults one copy per duplicate group and replaces the rest with reflinks (or hard links if allowed). |
 | 4 (optional) | `bdstorage daemon run /path/to/tree --interval-secs 3600` | Repeats step 3 on an interval; see [Background Daemon](#background-daemon-linux-only). |
 | If you need originals back | `bdstorage restore /path/to/tree` | Copies data back from the vault and breaks links; see restore flags below. |
+| Check vault status | `bdstorage status` | Prints a summary of the current vault state, including space savings, tracked paths, and deduplication ratio (no filesystem scan required). |
 
 Run **`restore`** when you want independent file copies again (for example before migrating data off the machine or when you no longer want shared extents).
 
@@ -203,6 +204,26 @@ bdstorage restore /path/to/directory
 | `-n`, `--dry-run` | Show what would be restored without writing. |
 
 When a vault object’s refcount hits zero during restore, it is **removed** (garbage collection).
+
+**Status** (passive vault inspection):
+
+```bash
+bdstorage status [--json]
+```
+
+| Flag | Meaning |
+|:---|:---|
+| `--json` | Print status report as a machine-readable JSON object (also respects global `--output-format json`). |
+
+Example output:
+```text
+Vault location   : ~/.imprint/store/
+Objects in vault : 124
+Total vault size : 1.2 GB
+Tracked paths    : 342
+Estimated savings: 840.5 MB
+Deduplication ratio: 1.70×
+```
 
 ## Background Daemon (Linux Only)
 

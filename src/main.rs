@@ -191,10 +191,6 @@ fn run() -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&report)?);
     }
 
-    if args.output_format == OutputFormat::Json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    }
-
     Ok(())
 }
 

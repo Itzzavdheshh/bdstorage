@@ -18,7 +18,7 @@ path = "src/main.rs"
 anyhow = "1"
 blake3 = "1"
 bincode = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 colored = "2"
 ctrlc = "3"
 crossbeam = "0.8"

@@ -409,6 +409,114 @@ fn test_dry_run_no_changes() {
     );
 }
 
+fn run_cmd_with_vault_dir(vault_dir: &Path, args: &[&str]) -> assert_cmd::Command {
+    let mut cmd = Command::new(
+        std::env::current_exe()
+            .ok()
+            .map(|mut exe| {
+                exe.pop();
+                if exe.ends_with("deps") {
+                    exe.pop();
+                }
+                exe.push("bdstorage");
+                exe
+            })
+            .expect("Failed to find bdstorage binary"),
+    );
+    cmd.env("HOME", "/nonexistent");
+    cmd.arg("--vault-dir").arg(vault_dir);
+    for arg in args {
+        cmd.arg(arg);
+    }
+    cmd
+}
+
+#[test]
+fn test_vault_dir_flag_dedupe_and_restore() {
+    let data_tmp = setup_env();
+    let vault_tmp = setup_env();
+
+    let target = data_tmp.path().join("data");
+    fs::create_dir(&target).expect("create target dir");
+
+    for i in 0..3 {
+        create_file_with_content(
+            &target,
+            &format!("dup_{}.txt", i),
+            b"vault-dir test content",
+        );
+    }
+
+    let mut dedupe_cmd = run_cmd_with_vault_dir(
+        vault_tmp.path(),
+        &[
+            "dedupe",
+            &target.to_string_lossy(),
+            "--allow-unsafe-hardlinks",
+        ],
+    );
+    dedupe_cmd.assert().success();
+
+    assert!(
+        vault_tmp.path().join("state.redb").exists(),
+        "state.redb should be in custom vault dir"
+    );
+    assert!(
+        vault_tmp.path().join("store").exists(),
+        "store/ should be in custom vault dir"
+    );
+
+    let mut restore_cmd =
+        run_cmd_with_vault_dir(vault_tmp.path(), &["restore", &target.to_string_lossy()]);
+    restore_cmd.assert().success();
+
+    let content = fs::read(target.join("dup_0.txt")).expect("read restored file");
+    assert_eq!(content, b"vault-dir test content");
+}
+
+#[test]
+fn test_bdstorage_vault_env_var() {
+    let data_tmp = setup_env();
+    let vault_tmp = setup_env();
+
+    let target = data_tmp.path().join("data");
+    fs::create_dir(&target).expect("create target dir");
+
+    for i in 0..3 {
+        create_file_with_content(&target, &format!("dup_{}.txt", i), b"env var test content");
+    }
+
+    let mut cmd = Command::new(
+        std::env::current_exe()
+            .ok()
+            .map(|mut exe| {
+                exe.pop();
+                if exe.ends_with("deps") {
+                    exe.pop();
+                }
+                exe.push("bdstorage");
+                exe
+            })
+            .expect("Failed to find bdstorage binary"),
+    );
+    cmd.env("HOME", "/nonexistent");
+    cmd.env("BDSTORAGE_VAULT", vault_tmp.path());
+    cmd.args([
+        "dedupe",
+        &target.to_string_lossy(),
+        "--allow-unsafe-hardlinks",
+    ]);
+    cmd.assert().success();
+
+    assert!(
+        vault_tmp.path().join("state.redb").exists(),
+        "state.redb should be in BDSTORAGE_VAULT dir"
+    );
+    assert!(
+        vault_tmp.path().join("store").exists(),
+        "store/ should be in BDSTORAGE_VAULT dir"
+    );
+}
 #[test]
 fn test_json_output_acceptance() {
     let temp_dir = setup_env();
@@ -561,3 +669,44 @@ fn test_status_after_scan_without_vault_fails() {
     let stderr = String::from_utf8_lossy(&assert_status.get_output().stderr);
     assert!(stderr.contains("No vault exists yet"));
 }
+
+#[test]
+fn test_status_with_custom_vault_dir() {
+    let data_tmp = setup_env();
+    let vault_tmp = setup_env();
+
+    let target = data_tmp.path().join("data");
+    fs::create_dir(&target).expect("create target dir");
+
+    create_file_with_content(&target, "file1.txt", b"hello vault dir status");
+    create_file_with_content(&target, "file2.txt", b"hello vault dir status");
+
+    // Run dedupe with custom vault-dir
+    let mut dedupe_cmd = run_cmd_with_vault_dir(
+        vault_tmp.path(),
+        &[
+            "dedupe",
+            &target.to_string_lossy(),
+            "--allow-unsafe-hardlinks",
+        ],
+    );
+    dedupe_cmd.assert().success();
+
+    // Check status with custom vault-dir
+    let mut status_cmd = run_cmd_with_vault_dir(vault_tmp.path(), &["status"]);
+    let assert_text = status_cmd.assert().success();
+    let stdout_text = String::from_utf8_lossy(&assert_text.get_output().stdout);
+    assert!(stdout_text.contains("Vault location"));
+    assert!(stdout_text.contains("Objects in vault"));
+
+    // Check status JSON with custom vault-dir
+    let mut status_json_cmd = run_cmd_with_vault_dir(vault_tmp.path(), &["status", "--json"]);
+    let assert_json = status_json_cmd.assert().success();
+    let stdout_json = String::from_utf8_lossy(&assert_json.get_output().stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout_json).expect("Status JSON should be valid JSON");
+
+    assert_eq!(json["objects_in_vault"], 1);
+    assert_eq!(json["total_vault_size"], 22);
+}
+

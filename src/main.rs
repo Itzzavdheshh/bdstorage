@@ -71,6 +71,13 @@ enum Commands {
         #[arg(long, short = 'n')]
         dry_run: bool,
     },
+    #[command(
+        about = "Print a summary of the current vault state and space savings (no scan required)."
+    )]
+    Status {
+        #[arg(long, action = clap::ArgAction::SetTrue)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -156,6 +163,27 @@ fn run() -> Result<()> {
                 state::State::open_default()?
             };
             restore_pipeline(&path, &state, dry_run)?;
+        }
+        Commands::Status { json } => {
+            let db_path = state::default_db_path()?;
+            if !db_path.exists() {
+                anyhow::bail!(
+                    "{} No vault found.\n{}",
+                    "[ERROR]".bold().red(),
+                    "Run 'bdstorage dedupe <path>' first to create the vault."
+                );
+            }
+            let state = state::State::open_readonly_if_exists()?;
+            let vault_path = vault::vault_root()?;
+            let summary = state.compute_summary(&vault_path)?;
+
+            if json || args.output_format == OutputFormat::Json {
+                println!("{}", serde_json::to_string_pretty(&summary)?);
+                return Ok(());
+            }
+
+            print_vault_status(&summary);
+            return Ok(());
         }
     }
 
@@ -396,16 +424,6 @@ fn scan_pipeline(
     hash_bar.finish_and_clear();
 
     let _ = db_writer_handle.join();
-
-    let mut refcount_ops = Vec::new();
-    for (hash, paths) in &results {
-        if paths.len() > 1 {
-            refcount_ops.push(DbOp::SetCasRefcount(*hash, paths.len() as u64));
-        }
-    }
-    if !refcount_ops.is_empty() {
-        state.batch_write(refcount_ops)?;
-    }
 
     Ok(results)
 }
@@ -816,6 +834,75 @@ fn get_inode(metadata: &std::fs::Metadata) -> u64 {
 fn print_summary(mode: &str, groups: &HashMap<Hash, Vec<PathBuf>>) {
     let duplicates = groups.values().filter(|g| g.len() > 1).count();
     println!("{mode} complete. duplicate groups: {duplicates}");
+}
+
+fn format_number(val: usize) -> String {
+    let s = val.to_string();
+    let chars: Vec<char> = s.chars().rev().collect();
+    let mut result = Vec::new();
+    for (i, c) in chars.iter().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(' ');
+        }
+        result.push(*c);
+    }
+    result.into_iter().rev().collect()
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes == 0 {
+        return "0 B".to_string();
+    }
+    let units = ["B", "KB", "MB", "GB", "TB", "PB"];
+    let mut size = bytes as f64;
+    let mut unit_idx = 0;
+    while size >= 1024.0 && unit_idx < units.len() - 1 {
+        size /= 1024.0;
+        unit_idx += 1;
+    }
+    format!("{:.1} {}", size, units[unit_idx])
+}
+
+fn print_vault_status(summary: &crate::state::VaultSummary) {
+    let mut vault_loc = summary.vault_location.clone();
+    if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+        if vault_loc.starts_with(&home) {
+            vault_loc = vault_loc.replacen(&home, "~", 1);
+        }
+    }
+    let mut display_loc = vault_loc.replace('\\', "/");
+    if !display_loc.ends_with('/') {
+        display_loc.push('/');
+    }
+
+    println!("{:<17}: {}", "Vault location", display_loc.white().bold());
+    println!(
+        "{:<17}: {}",
+        "Objects in vault",
+        format_number(summary.objects_in_vault).white().bold()
+    );
+    println!(
+        "{:<17}: {}",
+        "Total vault size",
+        format_bytes(summary.total_vault_size).green().bold()
+    );
+    println!(
+        "{:<17}: {}",
+        "Tracked paths",
+        format_number(summary.tracked_paths).white().bold()
+    );
+    println!(
+        "{:<17}: {}",
+        "Estimated savings",
+        format_bytes(summary.estimated_savings).green().bold()
+    );
+    println!(
+        "{:<17}: {}",
+        "Deduplication ratio",
+        format!("{:.2}×", summary.deduplication_ratio)
+            .yellow()
+            .bold()
+    );
 }
 
 fn restore_pipeline(path: &Path, state: &state::State, dry_run: bool) -> Result<()> {

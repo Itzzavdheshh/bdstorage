@@ -491,3 +491,73 @@ fn test_json_output_acceptance() {
     assert_eq!(json_dry["links_created"], 2);
     assert_eq!(json_dry["vault_objects_added"], 0);
 }
+
+#[test]
+fn test_status_command() {
+    let temp_dir = setup_env();
+    let home = temp_dir.path();
+    let target = home.join("data");
+    fs::create_dir(&target).expect("Failed to create target directory");
+
+    // 1. Status command without scan/dedupe should fail
+    let mut cmd_status_fail = run_cmd(home, &["status"]);
+    let assert_fail = cmd_status_fail.assert().failure();
+    let stderr = String::from_utf8_lossy(&assert_fail.get_output().stderr);
+    assert!(stderr.contains("No vault found") || stderr.contains("No vault exists yet"));
+
+    // 2. Perform a dedupe run to create the database/vault
+    create_file_with_content(&target, "file1.txt", b"hello world");
+    create_file_with_content(&target, "file2.txt", b"hello world");
+    let mut cmd_dedupe = run_cmd(
+        home,
+        &[
+            "dedupe",
+            &target.to_string_lossy(),
+            "--allow-unsafe-hardlinks",
+        ],
+    );
+    cmd_dedupe.assert().success();
+
+    // 3. Status command in text format should print output successfully
+    let mut cmd_status_text = run_cmd(home, &["status"]);
+    let assert_text = cmd_status_text.assert().success();
+    let stdout_text = String::from_utf8_lossy(&assert_text.get_output().stdout);
+    assert!(stdout_text.contains("Vault location"));
+    assert!(stdout_text.contains("Objects in vault"));
+    assert!(stdout_text.contains("Total vault size"));
+    assert!(stdout_text.contains("Tracked paths"));
+    assert!(stdout_text.contains("Estimated savings"));
+    assert!(stdout_text.contains("Deduplication ratio"));
+
+    // 4. Status command in json format should print valid JSON
+    let mut cmd_status_json = run_cmd(home, &["status", "--json"]);
+    let assert_json = cmd_status_json.assert().success();
+    let stdout_json = String::from_utf8_lossy(&assert_json.get_output().stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout_json).expect("Status JSON should be valid JSON");
+
+    assert!(json.get("vault_location").is_some());
+    assert_eq!(json["objects_in_vault"], 1);
+    assert_eq!(json["total_vault_size"], 11);
+    assert_eq!(json["tracked_paths"], 2);
+    assert_eq!(json["estimated_savings"], 11);
+}
+
+#[test]
+fn test_status_after_scan_without_vault_fails() {
+    let temp_dir = setup_env();
+    let home = temp_dir.path();
+    let target = home.join("data");
+    fs::create_dir(&target).expect("Failed to create target directory");
+
+    create_file_with_content(&target, "file1.txt", b"hello world");
+    create_file_with_content(&target, "file2.txt", b"hello world");
+
+    let mut cmd_scan = run_cmd(home, &["scan", &target.to_string_lossy()]);
+    cmd_scan.assert().success();
+
+    let mut cmd_status = run_cmd(home, &["status"]);
+    let assert_status = cmd_status.assert().failure();
+    let stderr = String::from_utf8_lossy(&assert_status.get_output().stderr);
+    assert!(stderr.contains("No vault exists yet"));
+}

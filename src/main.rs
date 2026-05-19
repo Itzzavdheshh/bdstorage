@@ -865,10 +865,10 @@ fn format_bytes(bytes: u64) -> String {
 
 fn print_vault_status(summary: &crate::state::VaultSummary) {
     let mut vault_loc = summary.vault_location.clone();
-    if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
-        if vault_loc.starts_with(&home) {
-            vault_loc = vault_loc.replacen(&home, "~", 1);
-        }
+    if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE"))
+        && vault_loc.starts_with(&home)
+    {
+        vault_loc = vault_loc.replacen(&home, "~", 1);
     }
     let mut display_loc = vault_loc.replace('\\', "/");
     if !display_loc.ends_with('/') {

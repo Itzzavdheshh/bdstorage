@@ -362,17 +362,15 @@ impl State {
                 bytes.copy_from_slice(value.value());
                 let refcount = u64::from_le_bytes(bytes);
 
-                if refcount > 0 {
-                    if let Some(&size) = unique_hashes.get(&hash) {
-                        let object_path = vault_object_path(vault_location, &hash);
-                        let Ok(object_metadata) = std::fs::metadata(object_path) else {
-                            continue;
-                        };
-                        let object_size = object_metadata.len();
-                        objects_in_vault += 1;
-                        total_vault_size += object_size;
-                        estimated_savings += size.saturating_mul(refcount.saturating_sub(1));
-                    }
+                if refcount > 0 && let Some(&size) = unique_hashes.get(&hash) {
+                    let object_path = vault_object_path(vault_location, &hash);
+                    let Ok(object_metadata) = std::fs::metadata(object_path) else {
+                        continue;
+                    };
+                    let object_size = object_metadata.len();
+                    objects_in_vault += 1;
+                    total_vault_size += object_size;
+                    estimated_savings += size.saturating_mul(refcount.saturating_sub(1));
                 }
             }
         }

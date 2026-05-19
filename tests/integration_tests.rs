@@ -709,4 +709,3 @@ fn test_status_with_custom_vault_dir() {
     assert_eq!(json["objects_in_vault"], 1);
     assert_eq!(json["total_vault_size"], 22);
 }
-

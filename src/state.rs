@@ -362,7 +362,9 @@ impl State {
                 bytes.copy_from_slice(value.value());
                 let refcount = u64::from_le_bytes(bytes);
 
-                if refcount > 0 && let Some(&size) = unique_hashes.get(&hash) {
+                if refcount > 0
+                    && let Some(&size) = unique_hashes.get(&hash)
+                {
                     let object_path = vault_object_path(vault_location, &hash);
                     let Ok(object_metadata) = std::fs::metadata(object_path) else {
                         continue;
